@@ -1,9 +1,11 @@
 package com.artemchep.basics_multithreading;
 
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.view.View;
 
 import androidx.annotation.UiThread;
+import androidx.annotation.WorkerThread;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -14,7 +16,9 @@ import com.artemchep.basics_multithreading.domain.Message;
 import com.artemchep.basics_multithreading.domain.WithMillis;
 
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Queue;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -22,8 +26,11 @@ public class MainActivity extends AppCompatActivity {
 
     private MessageAdapter mAdapter = new MessageAdapter(mList);
 
+    private final Agent mAgent = new Agent();
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        mAgent.start();
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
@@ -32,6 +39,12 @@ public class MainActivity extends AppCompatActivity {
         recyclerView.setAdapter(mAdapter);
 
         showWelcomeDialog();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        mAgent.interrupt();
     }
 
     private void showWelcomeDialog() {
@@ -54,19 +67,28 @@ public class MainActivity extends AppCompatActivity {
         mList.add(message);
         mAdapter.notifyItemInserted(mList.size() - 1);
 
-        // TODO: Start processing the message (please use CipherUtil#encrypt(...)) here.
-        //       After it has been processed, send it to the #update(...) method.
+        final long time = SystemClock.elapsedRealtime();
+        mAgent.submit(new Runnable() {
+            @Override
+            public void run() {
+                final String cipherText = CipherUtil.encrypt(message.value.plainText);
+                final Message cipherMessage = message.value.copy(cipherText);
 
-        // How it should look for the end user? Uncomment if you want to see. Please note that
-        // you should not use poor decor view to send messages to UI thread.
-//        getWindow().getDecorView().postDelayed(new Runnable() {
-//            @Override
-//            public void run() {
-//                final Message messageNew = message.value.copy("sample :)");
-//                final WithMillis<Message> messageNewWithMillis = new WithMillis<>(messageNew, CipherUtil.WORK_MILLIS);
-//                update(messageNewWithMillis);
-//            }
-//        }, CipherUtil.WORK_MILLIS);
+                final long elapsedTime = SystemClock.elapsedRealtime() - time;
+                final WithMillis<Message> item = new WithMillis<>(cipherMessage, elapsedTime);
+                updateOnUiThread(item);
+            }
+        });
+    }
+
+    @WorkerThread
+    public void updateOnUiThread(final WithMillis<Message> message) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                update(message);
+            }
+        });
     }
 
     @UiThread
@@ -82,4 +104,40 @@ public class MainActivity extends AppCompatActivity {
         throw new IllegalStateException();
     }
 
+    private static class Agent extends Thread {
+        private final Queue<Runnable> queue = new LinkedList<>();
+
+        @Override
+        public void run() {
+            super.run();
+            while (!interrupted()) {
+                final Runnable task;
+                try {
+                    task = poll();
+                } catch (InterruptedException e) {
+                    break;
+                }
+
+                task.run();
+            }
+        }
+
+        private synchronized Runnable poll() throws InterruptedException {
+            while (true) {
+                final Runnable runnable = queue.poll();
+                if (runnable != null) {
+                    return runnable;
+                }
+
+                // Wait till someone puts an item
+                // into the queue and wakes us up.
+                wait();
+            }
+        }
+
+        public synchronized void submit(Runnable runnable) {
+            queue.add(runnable);
+            notifyAll();
+        }
+    }
 }
